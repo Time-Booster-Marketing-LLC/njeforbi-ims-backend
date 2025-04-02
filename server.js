@@ -72,13 +72,15 @@ app.post("/create-product", async (req, res) => {
       return `${namePrefix}-${ProductCount.toString().padStart(3, "0")}`;
     };
 
-    const sku = await generateSKU(name);      
+    const sku = await generateSKU(name);  
+    const stockState = "IN";    
     const productData = {
       name,
       sku,
       quantity,
       price,
       barcode,
+      stockState,
       category,
       expiryDate,
       imageUrl,
@@ -89,7 +91,7 @@ app.post("/create-product", async (req, res) => {
   
     const productRef = await db.collection("products").add(productData);
 
-    res.status(201).json({ message: "Product created successfully", productId: productRef.id, sku });
+    res.status(201).json({ message: "Product created successfully", productId: productRef.id, sku, stockState });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -322,6 +324,35 @@ app.get("/category-by-id/:id", async (req, res) => {
     }
 
     res.status(200).json({ id: categoryDoc.id, ...categoryDoc.data() });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put("/stock-motion/:id", async (req, res) => {
+  try {
+    const { id } = req.params; 
+    console.log("Product ID to Update stock state:", id);  
+    
+    const { stockState } = req.body;
+
+    const productRef = db.collection("products").doc(id); 
+    const productDoc = await productRef.get();
+
+    console.log("Product Found:", productDoc.exists ? "Found" : "Not Found");
+
+    if (!productDoc.exists) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+ 
+    await productRef.update({
+      
+      stockState,
+      updatedAt: new Date(),  
+    });
+
+    res.status(200).json({ message: "stock updated successfully" });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
