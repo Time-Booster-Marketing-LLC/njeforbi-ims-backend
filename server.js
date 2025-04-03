@@ -3,7 +3,6 @@ require("dotenv").config();
 const cors = require("cors");
 const admin = require("firebase-admin");
 const jwt = require("jsonwebtoken");
-const prod = require("./controllers/product-controller")
 const bcrypt = require("bcryptjs"); 
 const { getFirestore, collection, addDoc, getDocs, getDoc, updateDoc, deleteDoc, doc, Timestampimestamp } = require("firebase/firestore")
 const app = express();
@@ -11,7 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 admin.initializeApp({
-  credential: admin.credential.cert("./njeforbi.json"),
+  credential: admin.credential.cert("./njeforbi-ims-firebase-adminsdk-fbsvc-b51e519fa7.json"),
   projectId: "njeforbi-ims",
 });
 
@@ -227,6 +226,107 @@ app.post("/login", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+app.post("/create-category", async (req, res) => {
+  try {
+    const { name, description } = req.body;
+    if (!name) return res.status(400).json({ error: "Category name is required" });
+
+    const categoryRef = await db.collection("categories").add({
+      name,
+      description: description || "",
+      createdAt: new Date(),
+    });
+
+    res.status(201).json({ message: "Category created successfully", categoryId: categoryRef.id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/categories", async (req, res) => {
+  try {
+    const querySnapshot = await db.collection("categories").get();
+    const categories = querySnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    
+    res.status(200).json(categories);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/category/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const categoryDoc = await db.collection("categories").doc(id).get();
+
+    if (!categoryDoc.exists) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    res.status(200).json({ id: categoryDoc.id, ...categoryDoc.data() });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put("/update-category/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description } = req.body;
+
+    const categoryRef = db.collection("categories").doc(id);
+    const categoryDoc = await categoryRef.get();
+
+    if (!categoryDoc.exists) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    await categoryRef.update({
+      name: name || categoryDoc.data().name,
+      description: description || categoryDoc.data().description,
+      updatedAt: new Date(),
+    });
+
+    res.status(200).json({ message: "Category updated successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/delete-category/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const categoryRef = db.collection("categories").doc(id);
+    const categoryDoc = await categoryRef.get();
+
+    if (!categoryDoc.exists) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    await categoryRef.delete();
+    res.status(200).json({ message: "Category deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+app.get("/category-by-id/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const categoryDoc = await db.collection("categories").doc(id).get();
+
+    if (!categoryDoc.exists) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    res.status(200).json({ id: categoryDoc.id, ...categoryDoc.data() });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 
 
