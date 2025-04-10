@@ -547,6 +547,32 @@ app.get("/transactions-history", async (req, res) => {
   }
 });
 
+app.get("/products/low-stock", async (req, res) => {
+  try {
+    const threshold = parseInt(req.query.threshold) || 10; 
+    const snapshot = await db.collection("products").get();
+
+    const lowStockProducts = [];
+    snapshot.forEach((doc) => {
+      const product = doc.data();
+      if (product.quantity <= threshold) {
+        lowStockProducts.push({ id: doc.id, ...product });
+      }
+    });
+
+    if (lowStockProducts.length === 0) {
+      return res.status(200).json({ message: "No low-stock products at the moment." });
+    }
+
+    res.status(200).json({
+      message: "Low-stock products found",
+      products: lowStockProducts
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 
 
