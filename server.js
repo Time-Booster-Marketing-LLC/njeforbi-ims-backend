@@ -358,6 +358,195 @@ app.put("/stock-motion/:id", async (req, res) => {
   }
 });
 
+app.post("/create-sales-order", async (req, res) => {
+  try {
+    const { customerId, items } = req.body; // items = [{ sku, quantity }]
+    if (!customerId || !items.length) {
+      return res.status(400).json({ error: "Customer and items are required" });
+    }
+
+    const batch = db.batch();
+    const productsForTransaction = [];
+    let totalAmount = 0;
+
+    for (const item of items) {
+      // Find product by SKU
+      const productSnap = await db.collection("products").where("sku", "==", item.sku).limit(1).get();
+      if (productSnap.empty) {
+        return res.status(404).json({ error: `Product with SKU ${item.sku} not found` });
+      }
+
+      const productDoc = productSnap.docs[0];
+      const productData = productDoc.data();
+
+      if (productData.quantity < item.quantity) {
+        return res.status(400).json({ error: `Not enough stock for ${item.sku}` });
+      }
+
+      const newQuantity = productData.quantity - item.quantity;
+
+      // Determine stock state
+      let stockState = "In Stock";
+      if (newQuantity === 0) stockState = "Out of Stock";
+      else if (newQuantity < 5) stockState = "Low Stock";
+
+      // Update product in batch
+      batch.update(productDoc.ref, {
+        quantity: newQuantity,
+        stockState,
+      });
+
+      // Add to transaction log
+      productsForTransaction.push({
+        productId: productDoc.id,
+        sku: item.sku,
+        quantity: item.quantity,
+        name: productData.name || "",
+        unitPrice: productData.price || 0,
+      });
+
+      totalAmount += (productData.price || 0) * item.quantity;
+    }
+
+    // Save sales order
+    const orderRef = db.collection("sales_orders").doc();
+    batch.set(orderRef, {
+      customerId,
+      items,
+      totalAmount,
+      createdAt: new Date(),
+    });
+
+    await batch.commit();
+
+    // Save transaction
+    await db.collection("transactions").add({
+      type: "sales_order",
+      reference: orderRef.id,
+      products: productsForTransaction,
+      totalAmount,
+      createdBy: req.user?.uid || null,
+      createdAt: new Date(),
+    });
+
+    res.status(201).json({ message: "Order placed successfully", orderId: orderRef.id });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+app.post("/receive-purchase-order/:poId", async (req, res) => {
+  try {
+    const { poId } = req.params;
+    const poDoc = await db.collection("purchase_orders").doc(poId).get();
+    if (!poDoc.exists) return res.status(404).json({ error: "PO not found" });
+
+    const po = poDoc.data();
+    const batch = db.batch();
+
+    for (const item of po.items) {
+      const productSnap = await db.collection("products").where("sku","==", item.sku).get();
+      if (productSnap.empty) continue;
+      const productRef = productSnap.docs[0].ref;
+
+      // Update stock
+      const newQty = (productSnap.docs[0].data().quantity || 0) + item.quantity;
+      batch.update(productRef, { quantity: newQty, updatedAt: new Date() });
+
+      // Log stock movement
+      const smRef = db.collection("stock_movements").doc();
+      batch.set(smRef, {
+        sku: item.sku,
+        change: item.quantity,
+        type: "purchase",
+        timestamp: new Date(),
+      });
+    }
+
+    // Update PO status
+    const poRef = db.collection("purchase_orders").doc(poId);
+    batch.update(poRef, { status: "Received", updatedAt: new Date() });
+
+    await batch.commit();
+    res.json({ message: "Purchase order received and stock updated" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/purchase-orders", async (req, res) => {
+  try {
+    const snapshot = await db.collection("purchase_orders").get();
+    const orders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.status(200).json(orders);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/purchase-order/:poId", async (req, res) => {
+  try {
+    const { poId } = req.params;
+    const docRef = db.collection("purchase_orders").doc(poId);
+    const docSnap = await docRef.get();
+    if (!docSnap.exists) {
+      return res.status(404).json({ error: "Purchase order not found" });
+    }
+    res.status(200).json({ id: docSnap.id, ...docSnap.data() });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put("/purchase-order/:poId", async (req, res) => {
+  try {
+    const { poId } = req.params;
+    const updates = req.body; // e.g., { status: "Canceled" } or updated items
+    const docRef = db.collection("purchase_orders").doc(poId);
+    const docSnap = await docRef.get();
+    if (!docSnap.exists) {
+      return res.status(404).json({ error: "Purchase order not found" });
+    }
+    updates.updatedAt = new Date();
+    await docRef.update(updates);
+    res.status(200).json({ message: "Purchase order updated successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/delete-purchase/:poId", async (req, res) => {
+  try {
+    const { poId } = req.params;
+    const docRef = db.collection("purchase_orders").doc(poId);
+    const docSnap = await docRef.get();
+    if (!docSnap.exists) {
+      return res.status(404).json({ error: "Purchase order not found" });
+    }
+    await docRef.delete();
+    res.status(200).json({ message: "Purchase order deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/transactions-history", async (req, res) => {
+  try {
+    const snapshot = await db.collection("transactions").orderBy("createdAt", "desc").get();
+    const transactions = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+    res.status(200).json(transactions);
+  } catch (error) {
+    console.error("Error fetching transactions:", error);
+    res.status(500).json({ error: "Failed to fetch transactions" });
+  }
+});
+
 
 
 
