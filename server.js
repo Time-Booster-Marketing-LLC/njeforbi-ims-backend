@@ -9,6 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+
 admin.initializeApp({
   credential: admin.credential.cert("./njeforbi-ims-firebase-adminsdk-fbsvc-b51e519fa7.json"),
   projectId: "njeforbi-ims",
@@ -20,9 +21,9 @@ const productsRef = db.collection("products");
 
 app.post("/create-user", async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { fullName, email, password, role,  phone, location } = req.body;
 
-    if (!name || !email || !password || !role ) {
+    if (!fullName || !email || !password || !role || !phone || !password || !location ) {
       return res.status(400).json({ error: "Fill in the required fields" });
     }
 
@@ -31,13 +32,18 @@ app.post("/create-user", async (req, res) => {
 
    
     const newUserRef = await userCollection.add({
-      name,
+      fullName,
       email,
       password: hashedPassword,
-      role
+      role,
+      phone,
+      password,
+      location
     });
 
-    const newUser = { id: newUserRef.id, name, email, role };
+    const newUser = { id: newUserRef.id, fullName, email, role,  phone,
+      password,
+      location };
 
  
     const accessToken = jwt.sign(newUser, process.env.ACCESS_TOKEN_SECRET, { expiresIn: "1h" });
@@ -97,15 +103,83 @@ app.post("/create-product", async (req, res) => {
   }
 });
 
-app.get("/products", async (req, res) => {
+app.post("/create-products", async (req, res) => {
   try {
-    const querySnapshot = await await productsRef.get();
-    const products = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.status(200).json(products);
+    const products = req.body; // Expecting an array of products
+
+    if (!Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ error: "Provide an array of products" });
+    }
+
+    const createdProducts = [];
+
+    for (const product of products) {
+      const { name, quantity, price, barcode, expiryDate, imageUrl, category } = product;
+
+      if (!name || !quantity || !price || !barcode || !expiryDate || !imageUrl || !category) {
+        continue; // Skip this product if required fields are missing
+      }
+
+      const [day, month, year] = expiryDate.split("-");
+      const parsedExpiryDate = new Date(`${year}-${month}-${day}`);
+
+      if (isNaN(parsedExpiryDate.getTime())) {
+        continue; // Skip invalid dates
+      }
+
+      const generateSKU = async (name) => {
+        const namePrefix = name.substring(0, 3).toUpperCase();
+        const productsRef = db.collection("products");
+        const productsMade = await productsRef.get();
+        const ProductCount = productsMade.size + 1;
+        return `${namePrefix}-${ProductCount.toString().padStart(3, "0")}`;
+      };
+
+      const sku = await generateSKU(name);
+      const stockState = "IN";
+
+      const productData = {
+        name,
+        sku,
+        quantity,
+        price,
+        barcode,
+        stockState,
+        category,
+        expiryDate: parsedExpiryDate,
+        imageUrl,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+
+      const productRef = await db.collection("products").add(productData);
+      createdProducts.push({ id: productRef.id, ...productData });
+    }
+
+    res.status(201).json({
+      message: `${createdProducts.length} products created successfully`,
+      products: createdProducts
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
+
+
+app.get("/products", async (req, res) => {
+  try {
+    const querySnapshot = await productsRef.get();
+    const products = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    res.status(200).json({
+      total: products.length,   // 👈 Add total count here
+      products: products        // 👈 Return the products list
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 app.put("/update-product/:id", async (req, res) => {
   try {
@@ -197,8 +271,7 @@ app.post("/login", async (req, res) => {
       return res.status(400).json({ error: "Email and password are required" });
     }
 
-   
-    const snapshot = await userCollection.where("email", "==", email).get();
+    const snapshot = await userCollection.where("email", "==", email.toLowerCase()).get();
 
     if (snapshot.empty) {
       return res.status(401).json({ error: "Invalid email or password" });
@@ -211,19 +284,77 @@ app.post("/login", async (req, res) => {
       return res.status(400).json({ error: "User role not found in database" });
     }
 
-  
-    const isMatch = await bcrypt.compare(password, user.password);
+    // Detect if password is hashed (bcrypt)
+    const bcryptRegex = /^\$2[aby]?\$[\d]+\$.{56}$/;
+    const isHashed = bcryptRegex.test(user.password);
+
+    let isMatch;
+    if (isHashed) {
+      isMatch = await bcrypt.compare(password, user.password);
+    } else {
+      isMatch = password === user.password;
+    }
+
     if (!isMatch) {
       return res.status(401).json({ error: "Invalid email or password" });
     }
 
-   
-    console.log(` Logged in as: ${user.role}`);
+    const payload = {
+      id: userDoc.id,
+      fullName: user.fullName || user.name || "",
+      email: user.email,
+      role: user.role
+    };
 
-    const payload = { id: userDoc.id, name: user.name, email: user.email, role: user.role };
-    const accessToken = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: "1h" });
+    const accessToken = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+      expiresIn: "1h"
+    });
 
-    res.json({ msg: "Login successful", token: accessToken, role: user.role });
+    res.json({ msg: "Login successful", token: accessToken,fullName: user.fullName, email: user.email, role: user.role });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Route: GET /get-user-by-email?email=user@example.com
+
+app.get("/get-user-by-email", async (req, res) => {
+  try {
+    const { email } = req.query;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    const userQuerySnapshot = await userCollection.where("email", "==", email).get();
+
+    if (userQuerySnapshot.empty) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const userDoc = userQuerySnapshot.docs[0];
+    const user = { id: userDoc.id, ...userDoc.data() };
+
+    res.json({ user });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/users", async (req, res) => {
+  try {
+    const snapshot = await userCollection.get();
+
+    if (snapshot.empty) {
+      return res.status(404).json({ error: "No users found" });
+    }
+
+    const users = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    res.status(200).json({ users });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
