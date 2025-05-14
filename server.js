@@ -19,6 +19,7 @@ const db = admin.firestore();
 const userCollection = db.collection("users");
 const productsRef = db.collection("products");
 
+
 app.post("/create-user", async (req, res) => {
   try {
     const { fullName, email, password, role,  phone, location } = req.body;
@@ -332,6 +333,7 @@ app.get("/get-user-by-email", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+
     const userDoc = userQuerySnapshot.docs[0];
     const user = { id: userDoc.id, ...userDoc.data() };
 
@@ -340,7 +342,6 @@ app.get("/get-user-by-email", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 app.get("/users", async (req, res) => {
   try {
     const snapshot = await userCollection.get();
@@ -353,8 +354,8 @@ app.get("/users", async (req, res) => {
       id: doc.id,
       ...doc.data()
     }));
-
-    res.status(200).json({ users });
+   
+    res.status(200).json({  total: users.length,users });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -545,6 +546,7 @@ app.post("/create-sales-order", async (req, res) => {
       customerId,
       items,
       totalAmount,
+      status: "pending",
       createdAt: new Date(),
     });
 
@@ -555,6 +557,7 @@ app.post("/create-sales-order", async (req, res) => {
       type: "sales_order",
       reference: orderRef.id,
       products: productsForTransaction,
+      status: "pending..",
       totalAmount,
       createdBy: req.user?.uid || null,
       createdAt: new Date(),
@@ -569,54 +572,124 @@ app.post("/create-sales-order", async (req, res) => {
 });
 
 
-app.post("/receive-purchase-order/:poId", async (req, res) => {
+app.patch("/orders/:orderId/status", async (req, res) => {
   try {
-    const { poId } = req.params;
-    const poDoc = await db.collection("purchase_orders").doc(poId).get();
-    if (!poDoc.exists) return res.status(404).json({ error: "PO not found" });
+    const { orderId } = req.params;
+    const { status } = req.body;
 
-    const po = poDoc.data();
-    const batch = db.batch();
-
-    for (const item of po.items) {
-      const productSnap = await db.collection("products").where("sku","==", item.sku).get();
-      if (productSnap.empty) continue;
-      const productRef = productSnap.docs[0].ref;
-
-      // Update stock
-      const newQty = (productSnap.docs[0].data().quantity || 0) + item.quantity;
-      batch.update(productRef, { quantity: newQty, updatedAt: new Date() });
-
-      // Log stock movement
-      const smRef = db.collection("stock_movements").doc();
-      batch.set(smRef, {
-        sku: item.sku,
-        change: item.quantity,
-        type: "purchase",
-        timestamp: new Date(),
-      });
+    if (!status) {
+      return res.status(400).json({ error: "Missing 'status' in request body" });
     }
 
-    // Update PO status
-    const poRef = db.collection("purchase_orders").doc(poId);
-    batch.update(poRef, { status: "Received", updatedAt: new Date() });
+    const { role } = await getUserRole(req);
 
-    await batch.commit();
-    res.json({ message: "Purchase order received and stock updated" });
+    if (role !== "admin") {
+      return res.status(403).json({ error: "Forbidden: Admins only" });
+    }
+
+    const orderRef = db.collection("sales_orders").doc(orderId);
+    const orderDoc = await orderRef.get();
+
+    if (!orderDoc.exists) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    await orderRef.update({
+      status,
+      updatedAt: new Date(),
+    });
+
+    return res.json({ message: "Order status updated successfully" });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return res.status(401).json({ error: error.message });
   }
 });
 
 app.get("/purchase-orders", async (req, res) => {
   try {
-    const snapshot = await db.collection("purchase_orders").get();
-    const orders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.status(200).json(orders);
+    const snapshot = await db.collection("sales_orders").get();
+    
+    let totalOrders = 0;
+    let totalDeliveredOrders = 0;
+    let totalPendingOrders = 0;
+
+    const orders = snapshot.docs.map(doc => {
+      const data = doc.data();
+      totalOrders++;
+
+      if (data.status === "Delivered") {
+        totalDeliveredOrders++;
+      }
+
+      if (data.status === "pending") {
+        totalPendingOrders++;
+      }
+
+      return { id: doc.id, ...data };
+    });
+
+    res.status(200).json({
+      totalOrders,
+      totalDeliveredOrders,
+      totalPendingOrders,
+      orders,
+    });
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
+
+
+// Middleware to verify admin token
+function verifyAdminToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Unauthorized: No token provided" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+    if (decoded.role !== "admin") {
+      return res.status(403).json({ error: "Forbidden: Admins only" });
+    }
+    req.user = decoded;
+    next();
+  } catch (err) {
+    res.status(403).json({ error: "Invalid token" });
+  }
+}
+
+// PUT /update-stock-status/:sku
+app.put("/update-stock-status/:sku", verifyAdminToken, async (req, res) => {
+  try {
+    const { sku } = req.params;
+    const { stockState } = req.body;
+
+    if (!stockState || !["IN", "OUT", "PENDING"].includes(stockState)) {
+      return res.status(400).json({ error: "Invalid or missing stockState value" });
+    }
+
+    const productSnap = await db.collection("products").where("sku", "==", sku).get();
+
+    if (productSnap.empty) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    const productDoc = productSnap.docs[0];
+    await productDoc.ref.update({
+      stockState,
+      updatedAt: new Date(),
+    });
+
+    res.status(200).json({ message: "Stock status updated successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 app.get("/purchase-order/:poId", async (req, res) => {
   try {
@@ -704,6 +777,116 @@ app.get("/products/low-stock", async (req, res) => {
   }
 });
 
+app.get("/transactions/monthly-items-performance", async (req, res) => {
+  try {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const snapshot = await db.collection("sales_order").get();
+
+    let deliveredItemCount = 0;
+    let totalItemCount = 0;
+
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      const createdAt = new Date(data.createdAt._seconds * 1000); // Convert Firestore timestamp
+
+      if (createdAt >= startOfMonth) {
+        // Count all items in the month
+        data.items.forEach(item => {
+          totalItemCount += item.quantity;
+        });
+
+        // Only count delivered items
+        if (data.status?.toLowerCase() === "delivered") {
+          data.items.forEach(item => {
+            deliveredItemCount += item.quantity;
+          });
+        }
+      }
+    });
+
+    const percentageDelivered = totalItemCount > 0
+      ? ((deliveredItemCount / totalItemCount) * 100).toFixed(2)
+      : "0.00";
+
+    res.status(200).json({
+      month: now.toLocaleString('default', { month: 'long' }),
+      deliveredItemCount,
+      totalItemCount,
+      percentageDelivered: Number(percentageDelivered)
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put("/update-order-status/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!status) {
+      return res.status(400).json({ error: "Status is required" });
+    }
+
+    const orderRef = db.collection("sales_orders").doc(id);
+    const orderSnap = await orderRef.get();
+
+    if (!orderSnap.exists) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    await orderRef.update({
+      status,
+      updatedAt: new Date()
+    });
+
+    res.status(200).json({ message: "Order status updated successfully", orderId: id, newStatus: status });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/sales/monthly-trend", async (req, res) => {
+  try {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+    // Create a map of all days in the month with 0 as default
+    const dailySales = {};
+    for (let d = new Date(startOfMonth); d <= endOfMonth; d.setDate(d.getDate() + 1)) {
+      const dateKey = d.toISOString().split("T")[0];
+      dailySales[dateKey] = 0;
+    }
+
+    const snapshot = await db.collection("sales_orders").get();
+
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      if (data.status === "Delivered" && data.createdAt?._seconds) {
+        const orderDate = new Date(data.createdAt._seconds * 1000);
+        const dateKey = orderDate.toISOString().split("T")[0];
+
+        if (orderDate >= startOfMonth && orderDate <= endOfMonth) {
+          dailySales[dateKey] += data.totalAmount;
+        }
+      }
+    });
+
+    const sortedSales = Object.keys(dailySales)
+      .sort()
+      .map(date => ({
+        date,
+        totalAmount: Number(dailySales[date].toFixed(2)),
+      }));
+
+    res.status(200).json(sortedSales);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 
 
